@@ -1,0 +1,68 @@
+{
+ "_meta": {
+  "fonte": "futebol.db",
+  "n_jogos": 660,
+  "gols_por_jogo": 2.2682,
+  "gols_incidente_total": 1115,
+  "n_vermelhos": 125,
+  "gols_jogo_incidente": 1.6576,
+  "escala_normalizacao": 1.3684,
+  "obs": "Curva (forma) vem do incidente; nivel escalado x1.37 pra bater com gols/jogo do placar real (incidente esta incompleto). PMF de acrescimo e efeito de vermelho sao PRIOR; recalibrar quando o length anunciado (injuryTime) for coletado."
+ },
+ "gols_por_jogo": 2.2682,
+ "home_share": 0.5489,
+ "taxa_media_min": 0.025202,
+ "h_reg_buckets": [
+  0.010366,
+  0.023221,
+  0.016172,
+  0.016586,
+  0.023221,
+  0.026123,
+  0.021562,
+  0.026538,
+  0.025709,
+  0.02405,
+  0.026953,
+  0.026123,
+  0.022392,
+  0.029855,
+  0.022392,
+  0.022806,
+  0.031099,
+  0.016586
+ ],
+ "h_stop_1h": 0.029747,
+ "h_stop_2h": 0.03133,
+ "exposicao_acrescimo": {
+  "t1": 2.3,
+  "t2": 4.5
+ },
+ "stoppage_extra_pmf": [
+  0.45,
+  0.28,
+  0.15,
+  0.08,
+  0.04
+ ],
+ "red": {
+  "down": 0.74,
+  "up": 1.3
+ },
+ "mult": {
+  "beta_xg": 0.5,
+  "gamma": 0.2,
+  "sigma": 0.35,
+  "d0": 1.5,
+  "dead": 0.8,
+  "clampLo": 0.45,
+  "clampHi": 2.2
+ },
+ "sigma_log": {
+  "base": 0.3,
+  "sem_stats": 0.1,
+  "instavel": 0.1,
+  "por_mult": 0.15,
+  "liga_rasa": 0.1
+ }
+}

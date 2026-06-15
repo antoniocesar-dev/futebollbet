@@ -1,0 +1,22 @@
+# --- Dados raspados (ToS SofaScore proíbe redistribuir) ---
+futebol.db
+futebol.db-wal
+futebol.db-shm
+amostras/
+logs/
+*.log
+logsbackfill-incidentes.log
+
+# --- Derivados / regeneráveis ---
+modelo.joblib
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Config local / ambiente ---
+.claude/
+.venv/
+venv/
+.env
+*.local.json
+bet365/_bm_check.js
