@@ -178,6 +178,78 @@ def forca_confronto(casa_id, fora_id, agora):
             "n": min(nc, nf, 19)}
 
 
+# ---------------------------------------------------------------- momentum (pressao ao vivo)
+import math  # noqa: E402
+
+MOM_TTL = 25            # momentum muda durante o jogo -> cache curto (s)
+MOM_GAMMA = 0.5         # forca do efeito (exp)
+# SofaScore nao tem "ataques perigosos"; usamos metricas mais fortes. Pesos somam 1.
+# (Sem "Big chances": baixa contagem por tempo e ruidosa; o xG ja capta qualidade.)
+MOM_PESOS = {
+    "Expected goals": 0.40,
+    "Shots on target": 0.25,
+    "Touches in penalty area": 0.20,   # ~ "ataque perigoso" (so existe no periodo ALL)
+    "Total shots": 0.10,
+    "Ball possession": 0.05,           # posse sozinha engana -> peso baixo
+}
+SHARE_CLAMP = (0.15, 0.85)             # 1 evento isolado nao domina o indice
+_cache_mom = {}         # event_id -> (mom_casa, mom_fora, ts)
+
+
+def _stats_periodo(data, periodo):
+    """{nome_stat: (home, away)} de um periodo (ALL/1ST/2ND). {} se ausente."""
+    for p in data.get("statistics", []):
+        if p.get("period") == periodo:
+            out = {}
+            for g in p.get("groups", []):
+                for it in g.get("statisticsItems", []):
+                    out[it.get("name")] = (it.get("homeValue"), it.get("awayValue"))
+            return out
+    return {}
+
+
+def momentum_de_stats(data):
+    """{mom_casa, mom_fora} a partir do payload /statistics. None se sem dado.
+    Usa o 2T (dominancia recente); cai pro jogo todo se 2T ausente. PURO/testavel."""
+    stats = _stats_periodo(data, "2ND") or _stats_periodo(data, "ALL")
+    if not stats:
+        return None
+    soma_w = soma_share = 0.0
+    for nome, w in MOM_PESOS.items():
+        v = stats.get(nome)
+        if not v or v[0] is None or v[1] is None:
+            continue
+        h, a = float(v[0]), float(v[1])
+        if h + a <= 0:
+            continue
+        sh = max(SHARE_CLAMP[0], min(SHARE_CLAMP[1], h / (h + a)))  # clamp anti-ruido
+        soma_share += w * sh              # fracao do mandante nessa metrica
+        soma_w += w
+    if soma_w == 0:
+        return None
+    ph = soma_share / soma_w               # pressao do mandante em [0,1]; 0.5 = equilibrio
+    mom_casa = max(0.6, min(1.7, math.exp(MOM_GAMMA * 2 * (ph - 0.5))))
+    mom_fora = max(0.6, min(1.7, math.exp(MOM_GAMMA * 2 * (0.5 - ph))))
+    return {"casa": round(mom_casa, 3), "fora": round(mom_fora, 3), "ph": round(ph, 3)}
+
+
+def momentum_confronto(event_id, agora):
+    """{casa, fora} (multiplicadores de momentum) do jogo ao vivo, ou None. Cache 25s."""
+    if not event_id:
+        return None
+    c = _cache_mom.get(event_id)
+    if c and agora - c[2] < MOM_TTL:
+        return {"casa": c[0], "fora": c[1]}
+    st, data = transporte.buscar(f"/event/{event_id}/statistics", ok_404=True)
+    if st != 200 or not data:
+        return None
+    m = momentum_de_stats(data)
+    if not m:
+        return None
+    _cache_mom[event_id] = (m["casa"], m["fora"], agora)
+    return m
+
+
 def casar(b365_home, b365_away, eventos):
     """Acha o evento SofaScore que corresponde ao confronto do bet365."""
     h, a = normalizar(b365_home), normalizar(b365_away)
@@ -201,10 +273,10 @@ def _sim(x, y):
     return max(jac, sub * 0.9)
 
 
-def montar_cross(com_forca=False, forca_min=75):
-    """{chave(home,away): {min,status,injury,placar,event_id[,forca]}}.
-    com_forca=True: anexa a forca-time SO nos jogos com minuto>=forca_min
-    (limita as chamadas extras ao SofaScore; taxas ficam cacheadas 6h)."""
+def montar_cross(com_forca=False, com_momentum=False, gate_min=75):
+    """{chave(home,away): {min,status,injury,placar,event_id[,forca][,mom]}}.
+    com_forca/com_momentum: anexa forca-time e/ou momentum SO nos jogos com
+    minuto>=gate_min (limita chamadas extras; forca cache 6h, momentum 25s)."""
     eventos, status = eventos_ao_vivo()
     agora = time.time()
     cross = {}
@@ -214,10 +286,15 @@ def montar_cross(com_forca=False, forca_min=75):
             "injury": ev["injury"], "placar": ev["placar"],
             "event_id": ev["event_id"],
         }
-        if com_forca and ev["min"] is not None and ev["min"] >= forca_min:
-            f = forca_confronto(ev.get("casa_id"), ev.get("fora_id"), agora)
-            if f:
-                entry["forca"] = f
+        if ev["min"] is not None and ev["min"] >= gate_min:
+            if com_forca:
+                f = forca_confronto(ev.get("casa_id"), ev.get("fora_id"), agora)
+                if f:
+                    entry["forca"] = f
+            if com_momentum:
+                m = momentum_confronto(ev.get("event_id"), agora)
+                if m:
+                    entry["mom"] = {"casa": m["casa"], "fora": m["fora"]}
         cross[ev["casa_norm"] + "|" + ev["fora_norm"]] = entry
     return cross, status, len(eventos)
 
@@ -240,20 +317,26 @@ def logar_sinal(rec):
 
 
 # ---------------------------------------------------------------- servidor
-def servir(porta=8765, intervalo=12, com_forca=False, forca_min=75):
+def servir(porta=8765, intervalo=12, com_forca=False, com_momentum=False, gate_min=75):
     from http.server import BaseHTTPRequestHandler, HTTPServer
     cache = {"cross": {}, "ts": 0.0}
 
     def atualizar():
+        if not com_momentum:        # sem --momentum: nao toca no SofaScore (IP bloqueado) — so /forca
+            return
         if time.time() - cache["ts"] < intervalo:
             return
         try:
-            cross, st, n = montar_cross(com_forca, forca_min)
+            cross, st, n = montar_cross(com_forca, com_momentum, gate_min)
             cache["cross"] = cross
             cache["ts"] = time.time()
-            nf = sum(1 for v in cross.values() if "forca" in v)
+            extra = []
+            if com_forca:
+                extra.append(f"{sum(1 for v in cross.values() if 'forca' in v)} forca")
+            if com_momentum:
+                extra.append(f"{sum(1 for v in cross.values() if 'mom' in v)} momentum")
             print(f"  cross atualizado: {n} jogos ao vivo (status {st})"
-                  + (f", {nf} com forca-time" if com_forca else ""), flush=True)
+                  + (" | " + ", ".join(extra) if extra else ""), flush=True)
         except Exception as e:
             print(f"  ! erro ao atualizar: {e}", file=sys.stderr)
 
@@ -269,15 +352,23 @@ def servir(porta=8765, intervalo=12, com_forca=False, forca_min=75):
         def do_OPTIONS(self):
             self.send_response(204); self._cors(); self.end_headers()
 
-        def do_GET(self):
-            atualizar()
-            body = json.dumps(cache["cross"]).encode("utf-8")
+        def _json(self, obj):
+            body = json.dumps(obj).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self._cors()
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
+            self._cors(); self.send_header("Cache-Control", "no-store"); self.end_headers()
             self.wfile.write(body)
+
+        def do_GET(self):
+            from urllib.parse import urlparse, parse_qs
+            u = urlparse(self.path)
+            if u.path.startswith("/forca"):       # /forca?casa=X&fora=Y -> forca FBref (cache local)
+                import fbref_forca
+                q = parse_qs(u.query)
+                casa = (q.get("casa", [""])[0]); fora = (q.get("fora", [""])[0])
+                return self._json(fbref_forca.forca_times(casa, fora) or {})
+            atualizar()                            # senao: cross do SofaScore (momentum/min/status)
+            self._json(cache["cross"])
 
         def do_POST(self):                       # /log : grava um sinal GREEN
             n = int(self.headers.get("Content-Length", 0))
@@ -315,8 +406,10 @@ def main():
     ps.add_argument("--porta", type=int, default=8765)
     ps.add_argument("--intervalo", type=int, default=12)
     ps.add_argument("--forca", action="store_true", help="anexa forca-time aos jogos no fim")
-    ps.add_argument("--forca-min", type=int, default=75, help="minuto a partir do qual busca a forca")
+    ps.add_argument("--momentum", action="store_true", help="anexa pressao ao vivo (xG/finalizacoes/posse)")
+    ps.add_argument("--gate-min", type=int, default=75, help="minuto a partir do qual busca forca/momentum")
     pf = sub.add_parser("forca"); pf.add_argument("casa_id", type=int); pf.add_argument("fora_id", type=int)
+    pm = sub.add_parser("momento"); pm.add_argument("event_id", type=int)
     a = ap.parse_args()
 
     if a.cmd == "live":
@@ -335,8 +428,11 @@ def main():
     elif a.cmd == "forca":
         print(forca_confronto(a.casa_id, a.fora_id, time.time()))
         transporte.fechar()
+    elif a.cmd == "momento":
+        print(momentum_confronto(a.event_id, time.time()))
+        transporte.fechar()
     elif a.cmd == "servir":
-        servir(a.porta, a.intervalo, a.forca, a.forca_min)
+        servir(a.porta, a.intervalo, a.forca, a.momentum, a.gate_min)
 
 
 if __name__ == "__main__":

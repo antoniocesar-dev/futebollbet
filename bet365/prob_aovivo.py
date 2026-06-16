@@ -256,6 +256,9 @@ def main():
     ap.add_argument("--n-jogos", type=int, default=10, help="amostra p/ shrinkage da forca manual")
     ap.add_argument("--h2h-share", type=float, default=None, help="share casa do confronto direto (0..1)")
     ap.add_argument("--peso-h2h", type=float, default=0.0, help="peso do H2H (default 0 = off)")
+    ap.add_argument("--fbref", default=None, help="liga no cache FBref (ex.: 'Premier League')")
+    ap.add_argument("--time-casa", default=None, help="nome do mandante (p/ --fbref)")
+    ap.add_argument("--time-fora", default=None, help="nome do visitante (p/ --fbref)")
     a = ap.parse_args()
 
     cal = carregar_cal()
@@ -263,6 +266,9 @@ def main():
     forca = None
     if a.evento is not None:
         forca = forca_time_db(a.evento)
+    elif a.fbref and a.time_casa and a.time_fora:
+        import fbref_forca
+        forca = fbref_forca.forca_confronto(a.fbref, a.time_casa, a.time_fora)
     elif a.lam_casa_full and a.lam_fora_full:
         forca = {"lam_casa": a.lam_casa_full, "lam_fora": a.lam_fora_full, "n": a.n_jogos}
 

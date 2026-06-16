@@ -115,12 +115,31 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="puxa placares faltantes via API")
     ap.add_argument("--listar", action="store_true")
+    ap.add_argument("--marcar", nargs=2, metavar=("ID", "RESULTADO"),
+                    help="marca o resultado real manualmente: --marcar 5 CASA")
     a = ap.parse_args()
     con = conectar()
+    if a.marcar:
+        sid, res = int(a.marcar[0]), a.marcar[1].upper()
+        row = con.execute("SELECT casa, fora, resultado, odd_tela FROM sinal_log WHERE id=?",
+                          (sid,)).fetchone()
+        if not row:
+            print(f"sinal id {sid} nao existe"); con.close(); return
+        casa, fora, aposta, odd = row
+        acertou = 1 if res == aposta else 0
+        pnl = ((odd or 0) - 1.0) if acertou else -1.0
+        con.execute("UPDATE sinal_log SET resultado_final=?, acertou=?, pnl=? WHERE id=?",
+                    (res, acertou, round(pnl, 3), sid))
+        con.commit()
+        print(f"#{sid} {casa} x {fora}: apostou {aposta}, saiu {res} -> "
+              f"{'ACERTOU' if acertou else 'ERROU'} | P&L {pnl:+.2f}u (odd {odd})")
+        con.close(); return
     if a.listar:
-        for r in con.execute("SELECT ts,casa,fora,resultado,odd_tela,resultado_final,acertou,pnl "
+        print(f"{'id':>3} {'ts':19} aposta@odd  -> resultado | acertou pnl   (jogo)")
+        for r in con.execute("SELECT id,ts,casa,fora,resultado,odd_tela,resultado_final,acertou,pnl "
                              "FROM sinal_log ORDER BY id DESC LIMIT 40"):
-            print(r)
+            print(f"#{r[0]:>2} {r[1]} {r[4]}@{r[5]} -> {r[6] or 'PENDENTE'} | "
+                  f"{'OK' if r[7]==1 else ('X' if r[7]==0 else '?')} {r[8] if r[8] is not None else ''}  ({r[2]} x {r[3]})")
         con.close(); return
     feitos, pend = liquidar(con, a.fetch)
     print(f"Liquidados agora: {feitos} (de {pend} pendentes)\n")

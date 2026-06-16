@@ -17,13 +17,27 @@ PASTA = os.path.dirname(os.path.abspath(__file__))
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ssurl", default=None, help="liga o cross-check SofaScore")
+    ap.add_argument("--ssurl", default=None, help="liga o servidor local de forca/log")
+    ap.add_argument("--stake", type=float, default=None, help="valor total p/ Dutching (ex.: 50)")
+    ap.add_argument("--mais-tempo", action="store_true", help="sinaliza mais cedo (ARM 84', GREEN antes)")
     a = ap.parse_args()
 
+    import re
     with open(os.path.join(PASTA, "alertador_valor.js"), encoding="utf-8") as f:
         js = f.read()
+    mv = re.search(r"VERSAO\s*=\s*'([^']+)'", js)
+    versao = mv.group(1) if mv else "?"
 
-    arg = ("{ssUrl:'%s'}" % a.ssurl) if a.ssurl else ""
+    cfg = []
+    if a.ssurl:
+        cfg.append("ssUrl:'%s'" % a.ssurl)
+    if a.stake:
+        cfg.append("stakeTotal:%g" % a.stake)
+    if a.mais_tempo:
+        cfg.append("armMin:84")          # ARM mais cedo = mais tempo p/ colocar as 2 apostas
+        cfg.append("greenBuffer:2.5")    # GREEN comeca mais cedo dentro do acrescimo
+        cfg.append("unknownStoppageFloor:1")
+    arg = "{" + ",".join(cfg) + "}" if cfg else ""
     toggle = (js + "\n;(function(){"
               "if(window.__avOn){window.pararValor();window.__avOn=false;}"
               "else{window.iniciarValor(%s);window.__avOn=true;}})();" % arg)
@@ -34,7 +48,10 @@ def main():
     html = """<!doctype html><html lang="pt-br"><meta charset="utf-8">
 <title>Instalar bet365 Alerter</title>
 <body style="font:16px sans-serif;max-width:640px;margin:40px auto;line-height:1.6;color:#111">
-<h2>⚡ Instalar o bet365 Alerter</h2>
+<h2>⚡ Instalar o bet365 Alerter &mdash; {versao}</h2>
+<p style="background:#ffd400;padding:6px 10px;border-radius:6px;display:inline-block">
+Versao desta pagina: <b>{versao}</b>. Ao rodar, a barra no canto deve mostrar <b>{versao}</b>.
+Se mostrar outra (ou nenhuma), o favorito esta velho &mdash; apague e arraste de novo.</p>
 <ol>
   <li>Mostre a barra de favoritos do Chrome: <b>Ctrl+Shift+B</b>.</li>
   <li><b>Arraste</b> o bot&atilde;o verde abaixo para a barra de favoritos.</li>
@@ -49,7 +66,7 @@ def main():
 <p style="color:#666;font-size:13px">Tamanho do bookmarklet: {tam} caracteres{ss}.
 Somente leitura &mdash; n&atilde;o aposta. Mant&eacute;m a aba do bet365 vis&iacute;vel
 pro rel&oacute;gio andar.</p>
-</body></html>""".format(href=html_escape(href), tam=tam,
+</body></html>""".format(href=html_escape(href), tam=tam, versao=versao,
                           ss=(" · SofaScore: " + a.ssurl) if a.ssurl else "")
 
     saida = os.path.join(PASTA, "bookmarklet.html")

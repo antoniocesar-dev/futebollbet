@@ -116,6 +116,17 @@ embutido por padrão: confronto direto é sinal fraco, ~ruído no fim de jogo).
 NOTA: a força é efeito de 2ª ordem no fim (o placar domina); ajuda mais em
 WATCH/ARM e em jogo equilibrado entre times desiguais.
 
+### Momentum (pressão ao vivo) — opcional, via SofaScore
+Multiplicador `momC/momF` (default 1.0). O SofaScore **não tem "ataques perigosos"**
+(métrica bet365/Sportradar); usamos equivalentes mais fortes do `/event/{id}/statistics`:
+**xG (0.40), finalizações no gol (0.25), toques na área (0.20), total de finalizações
+(0.10), posse (0.05)** — posse pesa pouco (engana). Calcula a *share* do mandante em
+cada métrica (clampada [0.15,0.85] anti-ruído), média ponderada → `ph`; `momC=exp(0.5·2·(ph−0.5))`
+limitado [0.6,1.7]. Time perdendo pressionando → seu λ sobe → P(resultado se manter)
+cai (testado: 1-0 89' com fora pressionando 91,7%→88,4%). Usa o 2T (recente), cai pro
+jogo todo; cache 25s; só jogos ≥ gate (75'). Liga com `sofascore_live.py servir --momentum`.
+Teste: `py bet365/sofascore_live.py momento <event_id>`.
+
 ### Tiers (alertador_valor.js)
 `IDLE → WATCH(80') → ARM(88'+, valor✓, mercado aberto) → GREEN`. GREEN só com:
 minuto ≥ `90 + (acréscimo − buffer)` (ou 92' se desconhecido), `fr.strict`, mercado

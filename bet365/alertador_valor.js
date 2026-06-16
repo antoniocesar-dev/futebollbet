@@ -21,6 +21,7 @@
 // re-calibrar: rode o .py e cole os novos valores no objeto CAL abaixo.
 
 ;(function () {
+  const VERSAO = 'v2.4';   // <- aparece na barra; se nao mostrar isso, e a versao ANTIGA
   // ---------------- calibracao (de hazard_cal.json) ----------------
   const CAL = {
     home_share: 0.5489,
@@ -53,6 +54,9 @@
     exigeOddAtiva: true,
     ssUrl: null,             // ex.: 'http://localhost:8765' (sofascore_live.py servir)
     ssRefreshMs: 10000,      // de quanto em quanto puxa o cross do SofaScore
+    painel: true,            // momentum pelo painel do bet365 (jogo aberto) — sem API, mesma fonte
+    stakeTotal: 10,          // R$ total p/ o calculo de Dutching (cobrir 2 resultados)
+    dutch: true,             // mostra o plano de Dutching no badge dos ARM/GREEN
   };
 
   const COR = { WATCH:'#6aa0ff', ARM:'#ffb300', GREEN:'#2bd24f', STALE:'#e23b3b' };
@@ -84,6 +88,55 @@
     if(!url) return;
     try{ fetch(url+'/log', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(rec)}).catch(()=>{}); }catch(e){}
+  }
+  // forca-time do FBref via servidor local (/forca), por nome; cache por jogo (muda devagar)
+  const forcaCache = (window.__forcaCache = window.__forcaCache || {});
+  function forcaLocal(url, casa, fora){
+    if(!url) return null;
+    const k = normalizarTime(casa)+'|'+normalizarTime(fora);
+    if(k in forcaCache) return forcaCache[k];           // resolvido: obj {lam_casa,...} ou null
+    forcaCache[k] = null;                                // em andamento -> nao re-busca
+    fetch(url+'/forca?casa='+encodeURIComponent(casa)+'&fora='+encodeURIComponent(fora))
+      .then(r=>r.json()).then(d=>{ forcaCache[k] = (d && d.lam_casa) ? d : null; }).catch(()=>{});
+    return null;
+  }
+
+  // ---------------- momentum pelo PAINEL do bet365 (jogo aberto, sem API/SofaScore) ----------
+  // Pesos das metricas do painel (sem xG; "Ataques Perigosos" = o sinal que a casa usa).
+  // pesos das stats reais do painel bet365 (mesma fonte das odds). Somam 1.
+  // SÓ as rodas (ordem casa/fora confiavel). A barra de chutes vem com ordem
+  // ambigua (inverte o sinal) -> fora. "Ataques Perigosos" e o sinal principal.
+  const PAINEL_W = { "Ataques Perigosos":0.65, "Ataques":0.20, "% de Posse":0.15 };
+  const SEL_LISTA = '.ovm-FixtureList, .ovm-SortedFixtureList';  // agrupada OU ordenada
+  function _painelFixture(){            // o jogo ABERTO = .ovm-Fixture FORA de qualquer lista
+    return [...document.querySelectorAll('.ovm-Fixture')].find(f => !f.closest(SEL_LISTA));
+  }
+  function lerPainel(){                  // {casa,fora,stats} do jogo aberto, ou null
+    const fx=_painelFixture(); if(!fx) return null;
+    const nomes=[...fx.querySelectorAll('[class*="TeamName"]')].map(txt).filter(Boolean);
+    if(nomes.length<2) return null;
+    const s={};
+    document.querySelectorAll('.ml1-WheelChartAdvanced').forEach(w=>{  // rodas: so existem no painel
+      const lab=txt(w.querySelector('.ml1-WheelChartAdvanced_Text'));
+      const ns=[...w.querySelectorAll('*')].map(txt).filter(x=>/^\d+$/.test(x)).map(Number);
+      if(lab&&ns.length>=2) s[lab]=[ns[0],ns[1]];
+    });
+    const sb=document.querySelector('.ml1-StatsLowerAdvanced_ShotsDualBar');
+    if(sb){ const n=(txt(sb).match(/\d+/g)||[]).map(Number);
+      if(n.length>=4){ s["Finalizacoes"]=[n[0],n[1]]; s["ChutesAoGol"]=[n[2],n[3]]; } }
+    return { casa:nomes[0], fora:nomes[1], stats:s };
+  }
+  function momentumPainel(stats){        // {casa,fora} a partir das stats do painel; 1/1 se vazio
+    let sw=0, ss=0;
+    for(const k in PAINEL_W){ const v=stats[k];
+      if(!v||(v[0]+v[1])<=0) continue;
+      const sh=Math.max(0.15,Math.min(0.85, v[0]/(v[0]+v[1])));
+      ss+=PAINEL_W[k]*sh; sw+=PAINEL_W[k];
+    }
+    if(sw===0) return {casa:1, fora:1, ph:0.5};
+    const ph=ss/sw;
+    return { casa:Math.max(0.6,Math.min(1.7,Math.exp(0.5*2*(ph-0.5)))),
+             fora:Math.max(0.6,Math.min(1.7,Math.exp(0.5*2*(0.5-ph)))), ph:+ph.toFixed(3) };
   }
 
   // ---------------- modelo (porta do prob_aovivo.py) ----------------
@@ -146,6 +199,19 @@
     return {lab:c[0][0],prob:c[0][1],idx:c[0][2]};
   }
   function mantemProb(gc,gf,pc,pe,pf){ return gc>gf?pc : gc<gf?pf : pe; }
+  // Dutching: cobre os 2 resultados de MENOR odd, dividindo `stake` pra retorno igual
+  // se qualquer um dos 2 sair. Voce PERDE tudo se sair o 3o. Por isso o que importa
+  // NAO e "lucro se cobrir", e o EV REAL = (1 - P_excluido)*retorno - stake (P do modelo).
+  function dutch(odds, p3, stake){          // odds=[o1,oX,o2], p3=[pCasa,pEmpate,pFora]
+    const LAB=['CASA','EMPATE','FORA'];
+    if(odds.filter(o=>o!=null).length<3) return null;
+    const ord=[0,1,2].sort((a,b)=>odds[a]-odds[b]);
+    const a=ord[0], b=ord[1], ex=ord[2];
+    const inv=1/odds[a]+1/odds[b], ret=stake/inv, pExcl=p3[ex];
+    return { a:{lab:LAB[a], stake:stake*(1/odds[a])/inv}, b:{lab:LAB[b], stake:stake*(1/odds[b])/inv},
+             excl:LAB[ex], pExcl, ret, seCobrePct:(ret/stake-1)*100,
+             evPct:((1-pExcl)*ret/stake-1)*100 };   // EV real (negativo = nao vale)
+  }
 
   // ---------------- parsing DOM ----------------
   const txt = e => (e&&typeof e.innerText==='string')?e.innerText.trim():'';
@@ -206,13 +272,16 @@
       b.style.cssText='position:absolute;top:2px;left:2px;z-index:9;font:bold 10px sans-serif;'
         +'padding:1px 5px;border-radius:3px;color:#000;pointer-events:none;white-space:nowrap';
       fx.prepend(b); }
-    b.style.background=cor; b.textContent=texto;
+    b.style.background=cor; b.innerHTML=String(texto).replace(/\n/g,'<br>');  // suporta 2 linhas (Dutch)
   }
 
   // ---------------- scan ----------------
   function scan(cfg, now){
     let cont={IDLE:0,WATCH:0,ARM:0,GREEN:0,STALE:0};
     ssFetch(cfg.ssUrl, now);                 // atualiza o cross do SofaScore (async)
+    const pn = cfg.painel ? lerPainel() : null;          // momentum do jogo ABERTO no painel
+    const pnMom = pn ? momentumPainel(pn.stats) : null;
+    const pnC = pn ? normalizarTime(pn.casa) : '', pnF = pn ? normalizarTime(pn.fora) : '';
     // TRAVA DE MERCADO: o modelo so vale p/ "Resultado Final" (1/X/2). Em "Proximo Gol"
     // ou "Partida - Gols" as 3 odds significam outra coisa -> nao sinaliza (evita erro).
     const tabAtiva=((document.querySelector('.ovm-ClassificationMarketSwitcherMenu_Item-active')||{}).textContent||'').trim();
@@ -221,7 +290,8 @@
       barra(cont, cfg, 'mercado "'+tabAtiva+'" — troque p/ "Resultado Final"');
       return;
     }
-    document.querySelectorAll('.ovm-Fixture').forEach(fx=>{        // robusto: view agrupada OU ordenada
+    document.querySelectorAll('.ovm-Fixture').forEach(fx=>{        // agrupada OU ordenada
+        if(!fx.closest(SEL_LISTA)) return;                          // pula o jogo aberto (painel)
         const comp=fx.closest('.ovm-Competition');
         const liga=comp?(txt(comp.querySelector('.ovm-CompetitionHeader'))||'').split('\n')[0].trim():'';
         const nomes=[...fx.querySelectorAll('[class*="TeamName"]')].map(txt).filter(Boolean);
@@ -246,8 +316,14 @@
           st.lastTot=relogio.tot; st.green=0; cont.STALE++; return; }
 
         // modelo
+        // momentum: painel do bet365 (jogo aberto) tem prioridade; senao SofaScore; senao 1.0
+        let momC=(ss&&ss.mom)?ss.mom.casa:1, momF=(ss&&ss.mom)?ss.mom.fora:1;
+        if(pnMom && pnC===normalizarTime(nomes[0]) && pnF===normalizarTime(nomes[1])){
+          momC=pnMom.casa; momF=pnMom.fora;
+        }
+        const forca = forcaLocal(cfg.ssUrl, nomes[0], nomes[1]) || (ss?ss.forca:null);  // FBref local > SofaScore
         const [pc,pe,pf]=probs(relogio.tot, pl[0], pl[1], A!=null?A:cfg.unknownStoppageFloor,
-                               {momC:1,momF:1,redC:0,redF:0, forca: ss?ss.forca:null});
+                               {momC, momF, redC:0, redF:0, forca});
         const dom=dominante(pl[0],pl[1],pc,pe,pf);
         const be=1/dom.prob, oddTela=odds[dom.idx];
         const valor=(oddTela!=null)&&(oddTela>be);
@@ -268,8 +344,17 @@
         const tela = oddTela!=null?oddTela.toFixed(2):'susp';
         const aTxt = A!=null?('+'+A):'+?';
         const motivo = !mercadoOk?' SUSPENSO' : (!noSurge?' GOL?' : '');
-        const txtBadge = `${tier}${tier==='ARM'?motivo:''} ${dom.lab} ${(dom.prob*100).toFixed(0)}%`
+        let txtBadge = `${tier}${tier==='ARM'?motivo:''} ${dom.lab} ${(dom.prob*100).toFixed(0)}%`
                        + ` | just ${be.toFixed(2)} | tela ${tela} ${valor?'✓':'✗'} | ${aTxt}`;
+        if(cfg.dutch && (tier==='ARM'||tier==='GREEN')){          // plano de Dutching (cobrir 2)
+          const dt=dutch(odds, [pc,pe,pf], cfg.stakeTotal);
+          if(dt){ const pA=Math.round(dt.a.stake/cfg.stakeTotal*100), pB=Math.round(dt.b.stake/cfg.stakeTotal*100);
+            const lucroCob=dt.ret-cfg.stakeTotal;   // lucro/prejuizo se um dos 2 cobrir
+            txtBadge += `\n💰 R$${dt.a.stake.toFixed(2)} ${dt.a.lab} (${pA}%) + R$${dt.b.stake.toFixed(2)} ${dt.b.lab} (${pB}%)`
+            + ` → volta R$${dt.ret.toFixed(2)} de R$${cfg.stakeTotal} = ${lucroCob>=0?'LUCRO +':'PERDE '}R$${lucroCob.toFixed(2)} se cobrir`
+            + ` · EV ${dt.evPct>=0?'+':''}${dt.evPct.toFixed(1)}%${dt.evPct>0?'✅':''} · perde tudo se ${dt.excl}`;
+          }
+        }
         pinta(fx, COR[tier], isGreen, txtBadge, tier==='WATCH'?-1:dom.idx);  // acende a celula 1/X/2
         if(isGreen && st.green===cfg.confirmScans){          // so na transicao p/ GREEN
           beep();
@@ -298,7 +383,8 @@
       ? `<span style="color:${COR.STALE}">⚠️ ${aviso}</span>`
       : `arm≥${cfg.armMin}' prob≥${cfg.probMin} · SofaScore: `
         + (cfg.ssUrl ? (Object.keys(ssCache.data).length+' jogos') : 'off');
-    bar.innerHTML=`<span style="color:${COR.GREEN}">GREEN ${c.GREEN}</span> · `
+    bar.innerHTML=`<span style="color:#33d17a;font-weight:bold">${VERSAO}</span>  `
+      +`<span style="color:${COR.GREEN}">GREEN ${c.GREEN}</span> · `
       +`<span style="color:${COR.ARM}">ARM ${c.ARM}</span> · `
       +`<span style="color:${COR.WATCH}">WATCH ${c.WATCH}</span> · `
       +`<span style="color:${COR.STALE}">STALE ${c.STALE}</span><br>`+linha2;

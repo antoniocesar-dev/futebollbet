@@ -3,6 +3,8 @@ futebol.db
 futebol.db-wal
 futebol.db-shm
 amostras/
+bet365/fbref_cache.json
+bet365/fbref_dados.txt
 logs/
 *.log
 logsbackfill-incidentes.log
